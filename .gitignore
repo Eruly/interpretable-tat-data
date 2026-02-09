@@ -1,0 +1,18 @@
+.venv/
+.env
+__pycache__/
+*.png
+output.txt
+demo_output.txt
+sample_info.json
+train.json
+
+# Hugging Face cache (since HF_HOME is set to current dir)
+hub/
+assets/
+blobs/
+snapshots/
+*.lock
+xet/
+*.log
+.ipynb_checkpoints/
