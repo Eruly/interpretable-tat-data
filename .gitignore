@@ -16,3 +16,32 @@ snapshots/
 xet/
 *.log
 .ipynb_checkpoints/
+# Model files and artifacts
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.ckpt
+*.gguf
+*.msgpack
+*.index.json
+config.json
+generation_config.json
+preprocessor_config.json
+video_preprocessor_config.json
+tokenizer.json
+tokenizer_config.json
+vocab.json
+merges.txt
+special_tokens_map.json
+added_tokens.json
+modules/
+
+# Logs and Debug
+*.log
+debug_*.txt
+test_inference_output.txt
+vllm_help*.txt
+
+# Output
+output/
