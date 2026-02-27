@@ -1,26 +1,65 @@
-# Python
+# ===== Python =====
 __pycache__/
 *.pyc
 *.pyo
 .venv/
 
-# Environment
+# ===== Environment =====
 .env
 
-# Large binaries
-*.deb
-
-# Temp images
-tmp_table_*.png
-
-# Model cache
+# ===== Model cache (HF_HOME) =====
 hub/
 xet/
+assets/
+blobs/
+snapshots/
+modules/
+*.lock
 
-# OS
+# ===== Model weights =====
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.ckpt
+*.gguf
+*.msgpack
+*.index.json
+
+# ===== Tokenizer / config artifacts =====
+config.json
+generation_config.json
+preprocessor_config.json
+video_preprocessor_config.json
+tokenizer.json
+tokenizer_config.json
+vocab.json
+merges.txt
+special_tokens_map.json
+added_tokens.json
+
+# ===== Large binaries =====
+*.deb
+
+# ===== Temp / generated images =====
+tmp_table_*.png
+
+# ===== Logs & debug output =====
+*.log
+output.txt
+demo_output.txt
+debug_*.txt
+test_inference_output.txt
+vllm_help*.txt
+output/
+
+# ===== Jupyter =====
+.ipynb_checkpoints/
+
+# ===== OS =====
 .DS_Store
 Thumbs.db
 
-# IDE
+# ===== IDE =====
 .vscode/
 .idea/

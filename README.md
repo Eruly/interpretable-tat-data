@@ -1,35 +1,79 @@
-# Interpretable TAT Data
+# Interpretable TAT-QA
 
-This repository contains the dataset and inference code for interpretable Table Question Answering (TAT-QA) using Qwen3-VL.
+Interpretable Table Question Answering using Qwen3-VL with visual grounding.
 
-## Description
+## Pipeline
 
-The project focuses on enhancing the interpretability of Vision-Language Models (VLMs) in table-related tasks. It uses a three-stage pipeline:
-1. **Initial Draft Reasoning**: Qwen3-VL provides a draft answer.
-2. **OCR Integration**: PaddleOCR is used to parse the table and provide ground-truth text and bounding boxes.
-3. **Grounded Reasoning**: The model provides a final answer by referencing the OCR-parsed results and including bounding box coordinates in its reasoning steps.
+3-stage inference pipeline for explainable table QA:
 
-## Directory Structure
+1. **Stage 1 – Reasoning**: Qwen3-VL generates a draft reasoning answer from the table image.
+2. **Stage 2 – OCR**: PaddleOCR extracts text and bounding boxes from the table.
+3. **Stage 3 – Grounded Injection**: Qwen re-generates the reasoning with `<bbox>` coordinates injected, linking each referenced value to its position on the table.
 
-- `data/`: Contains the processed TAT-QA samples and metadata.
-- `app.py`: Gradio-based demo application.
-- `inference_cls.py`: Core inference logic supporting vLLM and Transformers backends.
-- `data_utils.py`: Utilities for data loading and table rendering.
-- `modules/`: Helper modules for OCR and visualization.
+## Project Structure
 
-## Setup
+```
+.
+├── app.py                  # FastAPI server (API endpoints + static file serving)
+├── inference_cls.py        # 3-stage inference engine (vLLM API / Transformers)
+├── data_utils.py           # Data loading & table-to-PNG rendering
+├── static/                 # Frontend (vanilla HTML/JS/CSS)
+│   ├── index.html
+│   ├── app.js
+│   └── style.css
+├── data/                   # Dataset
+│   ├── train.json
+│   └── sample_info.json
+├── scripts/                # Launch & utility scripts
+│   ├── run_app_split_gpu.sh
+│   ├── run_vllm_qwen32b.sh
+│   ├── run_vllm_docker.sh  # PaddleOCR Docker
+│   ├── download_model.py
+│   ├── prepare_data.py
+│   ├── inference.py         # Standalone inference script
+│   └── inference_demo.py
+├── tests/                  # Test scripts
+│   ├── test_bbox_parsing.py
+│   ├── test_ocr_*.py
+│   └── test_load_32b.py
+├── chat_template.json
+└── .gitignore
+```
 
-1. Install requirements:
-   ```bash
-   pip install -r requirements.txt
-   # Ensure transformers is installed from source for Qwen3-VL support
-   pip install git+https://github.com/huggingface/transformers
-   ```
-2. Run the demo:
-   ```bash
-   python app.py
-   ```
+## Quick Start
+
+### 1. Start vLLM (Qwen3.5-27B)
+
+```bash
+bash scripts/run_vllm_qwen32b.sh
+```
+
+### 2. Start PaddleOCR Server
+
+```bash
+bash scripts/run_vllm_docker.sh
+```
+
+### 3. Run the Web App
+
+```bash
+bash scripts/run_app_split_gpu.sh
+```
+
+Open `http://localhost:7862` in your browser.
+
+## Configuration
+
+Environment variables are set in `scripts/run_app_split_gpu.sh`:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `QWEN_BACKEND` | `vllm_api` or `transformers` | `vllm_api` |
+| `QWEN_API_URL` | vLLM endpoint URL | `http://localhost:8000/v1` |
+| `QWEN_API_MODEL` | Model name on vLLM | `qwen3.5-27b` |
+| `OCR_SERVER_URL` | PaddleOCR vLLM endpoint | `http://localhost:8080/v1` |
+| `temperature` | Sampling temperature | `0.6` |
 
 ## License
 
-This project is licensed under the Apache 2.0 License.
+Apache 2.0

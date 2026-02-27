@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Run from project root
+cd "$(dirname "$0")/.."
+
 # App process sees GPU0 for OCR and calls vLLM API for Qwen.
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4
 export OCR_DEVICE=cuda:0
