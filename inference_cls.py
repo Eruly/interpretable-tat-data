@@ -89,6 +89,17 @@ def _encode_image_base64(image_path: str) -> str:
         return base64.b64encode(image_file.read()).decode("utf-8")
 
 
+def _normalize_openai_base_url(url: str) -> str:
+    normalized = (url or "").strip()
+    if not normalized:
+        return "http://localhost:8000/v1"
+    if not normalized.startswith(("http://", "https://")):
+        normalized = f"http://{normalized}"
+    if not normalized.rstrip("/").endswith("/v1"):
+        normalized = f"{normalized.rstrip('/')}/v1"
+    return normalized
+
+
 def _normalize_bbox(values: list[float]) -> list[float]:
     if not values:
         return values
@@ -122,7 +133,7 @@ def parse_lighton_ocr_output(raw_text: str) -> list[dict]:
 
     # Fallback for bbox-style markup.
     bbox_pattern = re.compile(
-        r"<bbox>\((.*),\s*\[\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*\]\)<bbox>",
+        r"<bbox>\((.*),\s*\[\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*\]\)</bbox>",
         re.DOTALL,
     )
     for m in bbox_pattern.finditer(raw_text):
@@ -202,6 +213,58 @@ def parse_paddle_ocr_output(raw_text: str) -> list[dict]:
     return items
 
 
+def inject_ocr_bboxes_into_reasoning(reasoning: str, ocr_items: list[dict]) -> str:
+    """
+    Build Stage-3 prompt for Qwen:
+    Given Stage-1 reasoning + Stage-2 OCR bboxes, only transform matched values into:
+    **{value}**<bbox>[xmin, ymin, xmax, ymax]</bbox>
+    """
+    ocr_payload = []
+    for item in ocr_items or []:
+        text = str(item.get("text", "")).strip()
+        bbox = item.get("bbox") or item.get("bbox_norm") or []
+        if not text or len(bbox) != 4:
+            continue
+        if item.get("bbox"):
+            coords = [int(round(float(v))) for v in item["bbox"]]
+        else:
+            coords = [int(round(float(v) * 1000.0)) for v in bbox]
+        ocr_payload.append({"value": text, "bbox": coords})
+
+    payload_json = json.dumps(ocr_payload, ensure_ascii=False, indent=2)
+    return (
+        "You are given a table image, Stage-2 OCR bbox results, and Stage-1 reasoning_content.\n"
+        "Rewrite ONLY the values that can be grounded by OCR.\n\n"
+        "Transformation rule (must follow exactly):\n"
+        "{value} -> **{value}**<bbox>[xmin, ymin, xmax, ymax]</bbox>\n\n"
+        "Hard constraints:\n"
+        "1) Keep every other character exactly unchanged (same wording, order, punctuation, spacing, line breaks).\n"
+        "2) Do not add, remove, summarize, translate, or paraphrase any text.\n"
+        "3) Only apply the transformation for values present in OCR list.\n"
+        "4) If nothing matches, return the original reasoning_content unchanged.\n"
+        "5) Your final answer must be exactly one fenced code block in this form:\n"
+        "```text\n"
+        "{transformed_text}\n"
+        "```\n"
+        "6) Do not output anything outside that single fenced block.\n\n"
+        f"Stage-2 OCR bboxes (0-1000):\n{payload_json}\n\n"
+        "Stage-1 reasoning_content:\n"
+        f"{reasoning}"
+    )
+
+
+def extract_transformed_text(stage3_raw: str) -> str:
+    if not stage3_raw:
+        return ""
+    fenced = re.search(r"```text\s*([\s\S]*?)```", stage3_raw, re.IGNORECASE)
+    if fenced:
+        return fenced.group(1).strip()
+    generic_fenced = re.search(r"```[\w-]*\s*([\s\S]*?)```", stage3_raw)
+    if generic_fenced:
+        return generic_fenced.group(1).strip()
+    return stage3_raw.strip()
+
+
 class PaddleOCRWrapper:
     def __init__(self, server_url="http://10.254.196.38:8080/v1", model_name="PaddleOCR-VL-1.5-0.9B"):
         self.server_url = server_url
@@ -241,14 +304,15 @@ class PaddleOCRWrapper:
             raw_text = response.choices[0].message.content
         except Exception as e:
             print(f"[PaddleOCR] Request failed: {e}")
-            return {"raw_text": "", "items": []}
+            return {"raw_text": "", "items": [], "error": str(e)}
             
         print(f"[PaddleOCR] Raw response length: {len(raw_text)}")
         items = parse_paddle_ocr_output(raw_text)
         
         return {
             "raw_text": raw_text,
-            "items": items
+            "items": items,
+            "error": "",
         }
 
 
@@ -264,18 +328,21 @@ class QwenInference:
         self.backend = os.getenv("QWEN_BACKEND", backend).lower()
         self.tensor_parallel_size = int(os.getenv("QWEN_TP", tensor_parallel_size))
         self.max_model_len = int(os.getenv("QWEN_MAX_MODEL_LEN", max_model_len))
-        self.api_url = os.getenv("QWEN_API_URL", "http://localhost:8000/v1")
+        self.api_url = _normalize_openai_base_url(os.getenv("QWEN_API_URL", "http://localhost:8000/v1"))
         self.api_key = os.getenv("QWEN_API_KEY", "EMPTY")
         self.api_model = os.getenv("QWEN_API_MODEL", self.model_id)
+        self._last_reasoning = ""
+        self._last_content = ""
 
         # OCR settings: using PaddleOCR via vLLM server
         self.ocr_server_url = os.getenv("OCR_SERVER_URL", "http://localhost:8080/v1")
         self._ocr_engine = None
 
         # Sampling parameters from environment
-        self.temperature = float(os.getenv("temperature", "1.0"))
+        self.temperature = float(os.getenv("temperature", "0.6"))
         self.top_p = float(os.getenv("top_p", "0.95"))
         self.top_k = int(os.getenv("top_k", "20"))
+        self.min_p = float(os.getenv("min_p", "0.0"))
         self.repetition_penalty = float(os.getenv("repetition_penalty", "1.0"))
         self.presence_penalty = float(os.getenv("presence_penalty", "0.0"))
         self.max_tokens = int(os.getenv("out_seq_length", "8192"))
@@ -366,44 +433,55 @@ class QwenInference:
         _patch_find_spec(disable_flash_attn=False, disable_torchvision=disable_torchvision)
 
         import torch
-        from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
-        from qwen_vl_utils import process_vision_info
-
-        if "Qwen2.5-VL" not in self.model_id:
-            raise ValueError(
-                "Transformers backend currently supports Qwen2.5-VL models. "
-                f"Got model_id={self.model_id}"
-            )
+        from transformers import AutoModelForImageTextToText, AutoProcessor
 
         self._torch = torch
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         dtype = torch.bfloat16 if self.device == "cuda" else torch.float32
 
         print(f"Loading model {self.model_id} with Transformers on {self.device}...")
-        self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-            self.model_id,
-            torch_dtype=dtype,
-            device_map="auto" if self.device == "cuda" else None,
-            trust_remote_code=True,
-            attn_implementation="sdpa", # Force SDPA to avoid broken flash-attn
-        )
+        model_kwargs = {
+            "torch_dtype": dtype,
+            "device_map": "auto" if self.device == "cuda" else None,
+            "trust_remote_code": True,
+            "attn_implementation": "sdpa",
+        }
+        try:
+            self.model = AutoModelForImageTextToText.from_pretrained(
+                self.model_id,
+                **model_kwargs,
+            )
+        except TypeError:
+            # Some model implementations do not accept attn_implementation.
+            model_kwargs.pop("attn_implementation", None)
+            self.model = AutoModelForImageTextToText.from_pretrained(
+                self.model_id,
+                **model_kwargs,
+            )
         if self.device != "cuda":
             self.model = self.model.to(self.device)
 
         self.processor = AutoProcessor.from_pretrained(self.model_id, trust_remote_code=True)
-        self.process_vision_info = process_vision_info
 
     def _get_ocr_engine(self) -> PaddleOCRWrapper:
         if self._ocr_engine is None:
             self._ocr_engine = PaddleOCRWrapper(server_url=self.ocr_server_url)
         return self._ocr_engine
 
-    def _run_qwen(self, image_path: str, prompt: str, max_tokens: int | None = None) -> str:
+    def _run_qwen(
+        self,
+        image_path: str,
+        prompt: str,
+        max_tokens: int | None = None,
+        system_prompt: str | None = None,
+    ) -> str:
         # Cap max_tokens to preserve context window (32768 total)
         max_tokens = max_tokens or self.max_tokens
         if self.backend == "vllm_api" and max_tokens > 16384:
             max_tokens = 16384 # Safety cap
 
+        self._last_reasoning = ""
+        self._last_content = ""
         output_text = ""
 
         if self.backend == "vllm":
@@ -411,6 +489,7 @@ class QwenInference:
                 temperature=self.temperature,
                 top_p=self.top_p,
                 top_k=self.top_k,
+                min_p=self.min_p,
                 repetition_penalty=self.repetition_penalty,
                 presence_penalty=self.presence_penalty,
                 max_tokens=max_tokens,
@@ -424,7 +503,15 @@ class QwenInference:
 
         elif self.backend == "vllm_api":
             base64_image = _encode_image_base64(image_path)
-            messages = [
+            messages = []
+            if system_prompt:
+                messages.append(
+                    {
+                        "role": "system",
+                        "content": [{"type": "text", "text": system_prompt}],
+                    }
+                )
+            messages.append(
                 {
                     "role": "user",
                     "content": [
@@ -435,7 +522,7 @@ class QwenInference:
                         {"type": "text", "text": prompt},
                     ],
                 }
-            ]
+            )
 
             chat_response = self.client.chat.completions.create(
                 model=self.api_model,
@@ -447,27 +534,46 @@ class QwenInference:
                     "repetition_penalty": self.repetition_penalty,
                     "presence_penalty": self.presence_penalty,
                     "top_k": self.top_k,
+                    "min_p": self.min_p,
+                    "chat_template_kwargs": {"enable_thinking": True},
                 },
             )
-            output_text = chat_response.choices[0].message.content
+            message = chat_response.choices[0].message
+            reasoning = getattr(message, "reasoning", None) or getattr(message, "reasoning_content", None)
+            content = message.content or ""
+            if reasoning:
+                self._last_reasoning = reasoning.strip()
+                self._last_content = content.strip()
+                output_text = self._last_reasoning
+            else:
+                output_text = content
 
         elif self.backend == "transformers":
-            messages = [
+            from PIL import Image
+
+            messages = []
+            if system_prompt:
+                messages.append(
+                    {
+                        "role": "system",
+                        "content": [{"type": "text", "text": system_prompt}],
+                    }
+                )
+            messages.append(
                 {
                     "role": "user",
                     "content": [
-                        {"type": "image", "image": image_path},
+                        {"type": "image"},
                         {"type": "text", "text": prompt},
                     ],
                 }
-            ]
+            )
 
             text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-            image_inputs, video_inputs = self.process_vision_info(messages)
+            image_inputs = [Image.open(image_path).convert("RGB")]
             inputs = self.processor(
                 text=[text],
                 images=image_inputs,
-                videos=video_inputs,
                 padding=True,
                 return_tensors="pt",
             )
@@ -487,60 +593,54 @@ class QwenInference:
         else:
             raise RuntimeError(f"Unsupported backend: {self.backend}")
 
-        # Post-processing: prepend <think> if missing (for thinking models)
-        # Often the prompt ends with <think> and the model continues from there, so output is just the thought content.
-        if output_text and not output_text.strip().startswith("<think>"):
-            output_text = "<think>\n" + output_text
-        
+        if not self._last_reasoning:
+            self._last_reasoning = output_text.strip()
+        if not self._last_content:
+            self._last_content = output_text.strip()
         return output_text
 
     def get_answer_with_details(self, image_path: str, question: str) -> dict:
         print(f"[QwenInference] --- Starting 3-Stage Inference for question: {question[:50]}... ---")
-        
-        # Stage 1: Qwen draft reasoning/answer without forced bbox generation.
-        print("[QwenInference] Stage 1: Running Qwen draft reasoning...")
-        stage1_prompt = (
-            f"Question: {question}\n\n"
-            "Think step-by-step and answer using this format exactly:\n"
-            "1) A single <think>...</think> block for reasoning\n"
-            "2) Final short answer after </think>\n"
-            "Do not output any bbox tags in this first pass."
+        print("[QwenInference] Stage 1: Running reasoning generation...")
+        stage1_system_prompt = (
+            "You are a grounded table QA assistant.\n"
         )
-        stage1_answer = self._run_qwen(image_path, stage1_prompt)
-        print(f"[QwenInference] Stage 1 finished. Answer length: {len(stage1_answer)}")
+        stage1_user_prompt = (
+            question
+        )
+        stage1_answer = self._run_qwen(
+            image_path,
+            stage1_user_prompt,
+            # system_prompt=stage1_system_prompt,
+        )
+        stage1_reasoning = self._last_reasoning or stage1_answer
+        stage1_output_text = self._last_content or stage1_answer
+        print(f"[QwenInference] Stage 1 finished. Reasoning length: {len(stage1_reasoning)}")
 
-        # Stage 2: OCR extraction with PaddleOCR.
-        print("[QwenInference] Stage 2: Running PaddleOCR...")
+        print("[QwenInference] Stage 2: Running PaddleOCR for bbox extraction...")
         ocr_result = self._get_ocr_engine().run(image_path)
-        ocr_items = ocr_result["items"]
-        print(f"[QwenInference] Stage 2 finished. Detected {len(ocr_items)} items.")
+        ocr_raw = ocr_result.get("raw_text", "")
+        ocr_items = ocr_result.get("items", [])
+        ocr_error = ocr_result.get("error", "")
+        print(f"[QwenInference] Stage 2 finished. OCR items: {len(ocr_items)}")
 
-        # Stage 3: Qwen rewrites the prior reasoning and injects bbox entries in <think>.
-        print("[QwenInference] Stage 3: Running Qwen grounded reasoning...")
-        ocr_json = json.dumps(ocr_items[:300], ensure_ascii=False)
-        stage3_prompt = (
-            f"Original question:\n{question}\n\n"
-            "Your previous answer:\n"
-            f"{stage1_answer}\n\n"
-            "OCR detections (use these boxes as grounding evidence):\n"
-            f"{ocr_json}\n\n"
-            "Your task is to REPRODUCE your previous answer EXACTLY, but with bounding boxes inserted into the arguments inside <think>.\n"
-            "Rules:\n"
-            "- COPY the content from 'Your previous answer'.\n"
-            "- Inside <think>...</think>, whenever a number or text fragment matches an OCR detection, append its bbox immediately. Format: `value <bbox>(value, [xmin, ymin, xmax, ymax])<bbox>`.\n"
-            "- Do NOT change the reasoning logic or words.\n"
-            "- Do NOT add bboxes to the final answer after </think>.\n"
-            "- The final answer must be identical to the Stage 1 final answer."
-        )
-        stage3_answer = self._run_qwen(image_path, stage3_prompt)
-        print(f"[QwenInference] Stage 3 finished. Answer length: {len(stage3_answer)}")
+        print("[QwenInference] Stage 3: Running Qwen injection prompt for bbox tagging...")
+        stage3_prompt = inject_ocr_bboxes_into_reasoning(stage1_reasoning, ocr_items)
+        self._run_qwen(image_path, stage3_prompt)
+        # Stage 3 must use final assistant content, not reasoning trace.
+        stage3_raw = self._last_content or self._last_reasoning
+        stage3_reasoning = extract_transformed_text(stage3_raw)
+        print(f"[QwenInference] Stage 3 finished. Reasoning length: {len(stage3_reasoning)}")
 
         return {
-            "final_answer": stage3_answer,
+            "final_answer": stage1_output_text,
             "stage1_answer": stage1_answer,
-            "ocr_raw": ocr_result["raw_text"],
+            "stage1_reasoning": stage3_reasoning,
+            "stage1_reasoning_raw": stage1_reasoning,
+            "ocr_raw": ocr_raw,
             "ocr_items": ocr_items,
-            "stage3_answer": stage3_answer,
+            "ocr_error": ocr_error,
+            "stage3_answer": stage3_reasoning,
         }
 
     def get_answer(self, image_path: str, question: str) -> str:

@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Qwen3-VL Interpretable Table QA</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="app-header">
+    <h1>Qwen3-VL TAT-QA Interpretable Demo</h1>
+    <p class="subtitle">Pipeline: <strong>3-Stage (Reasoning &rarr; PaddleOCR &rarr; BBox Injection)</strong></p>
+  </header>
+
+  <nav class="tab-bar">
+    <button class="tab-btn active" data-tab="pipeline">Pipeline Details</button>
+    <button class="tab-btn" data-tab="grounding">Stage 3 Grounding View</button>
+  </nav>
+
+  <!-- ===== TAB 1: Pipeline Details ===== -->
+  <section id="tab-pipeline" class="tab-panel active">
+    <div class="pipeline-layout">
+      <aside class="sidebar">
+        <div class="card">
+          <h3>1. Select Sample</h3>
+          <select id="sample-selector"></select>
+          <button id="btn-load" class="btn btn-secondary">Load &amp; Render Table</button>
+        </div>
+        <div class="card">
+          <h3>2. Input Question</h3>
+          <textarea id="question-input" rows="3" placeholder="e.g., What was the revenue in 2019?"></textarea>
+          <div id="paragraphs-display" class="paragraphs"></div>
+          <button id="btn-infer" class="btn btn-primary">Run Inference</button>
+          <div id="spinner" class="spinner hidden"></div>
+        </div>
+      </aside>
+
+      <main class="main-content">
+        <div class="card">
+          <h3>Table Image</h3>
+          <img id="table-img" class="table-image" alt="Table will appear here">
+        </div>
+        <div class="card">
+          <h3>3. Stage 1: Reasoning</h3>
+          <div id="stage1-reasoning" class="text-output"></div>
+        </div>
+        <div class="card">
+          <h3>4. Output Text</h3>
+          <div id="final-answer" class="text-output"></div>
+        </div>
+        <div class="card">
+          <h3>5. Stage 2: OCR Result</h3>
+          <pre id="stage2-ocr" class="text-output pre-output"></pre>
+        </div>
+        <div class="card">
+          <h3>6. Stage 3: Injected Reasoning</h3>
+          <pre id="stage3-raw" class="text-output pre-output"></pre>
+        </div>
+      </main>
+    </div>
+  </section>
+
+  <!-- ===== TAB 2: Stage 3 Grounding View ===== -->
+  <section id="tab-grounding" class="tab-panel">
+    <div class="grounding-layout">
+      <div class="card grounding-table-card">
+        <h3>Table</h3>
+        <div id="grounding-table-wrap" class="grounding-img-wrap">
+          <img id="grounding-table-img" class="table-image" alt="Load a sample first">
+        </div>
+      </div>
+      <div class="card grounding-text-card">
+        <h3>Stage 3 Final Text <span class="hint">(hover bbox to highlight on table)</span></h3>
+        <div id="grounding-stage3-text" class="reasoning-col"></div>
+      </div>
+      <div class="card" style="width:100%">
+        <h3>Output Text</h3>
+        <div id="grounding-output-text" class="text-output"></div>
+      </div>
+    </div>
+  </section>
+
+  <div id="bbox-overlay" class="bbox-overlay"></div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
